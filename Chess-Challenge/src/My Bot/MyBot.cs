@@ -7,6 +7,14 @@ public class MyBot : IChessBot
 {
     int[] pieceValues = { 0, 100, 300, 300, 500, 900, 0 };
     Board currentBoard;
+    struct Entry
+    {
+        public bool occupied = false;
+        public int value = 0;
+        public int depth = 0;
+        public Entry() { }
+    };
+    Entry[] table;
 
     int evaluate()
     {
@@ -40,6 +48,12 @@ public class MyBot : IChessBot
 
     int quiesce(int alpha, int beta)
     {
+        var entry = table[currentBoard.ZobristKey % (ulong)table.Length];
+        if (entry.occupied)
+        {
+            return Math.Max(entry.value, alpha);
+        }
+
         int val = evaluate();
         if (val >= beta)
             return beta;
@@ -64,8 +78,15 @@ public class MyBot : IChessBot
 
     int minimax(int alpha, int beta, int depth, Action<Move> action)
     {
+        var entry = table[currentBoard.ZobristKey % (ulong)table.Length];
+        if (entry.occupied && depth < entry.depth)
+        {
+            return Math.Max(entry.value, alpha);
+        }
         if (depth == 0) return quiesce(alpha, beta);
         if (currentBoard.IsDraw()) return 0;
+        // This allows us to always be making progress to checkmate when checkmate is available
+        // before we would move back and forth between positions until forced to due to a.
         if (currentBoard.IsInCheckmate()) return -999999 - depth;
 
         var moves = currentBoard.GetLegalMoves();
@@ -85,11 +106,15 @@ public class MyBot : IChessBot
             }
             if (alpha >= beta) break;
         }
+        entry.occupied = true;
+        entry.value = alpha;
+        entry.depth = depth;
         return alpha;
     }
 
     public Move Think(Board board, Timer timer)
     {
+        table = new Entry[1024 * 1024 * 100];
         currentBoard = board;
         Move retMove = Move.NullMove;
         nodes = 0;

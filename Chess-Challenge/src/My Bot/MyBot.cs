@@ -3,6 +3,15 @@ using System.Linq;
 using System;
 using System.Collections.Generic;
 
+/**
+TODO: investigate performance with and without table
+TODO: check to see performance with and without move ordering
+
+TODO: Game 5: this is crazy search space at depth 5 atm, I think this may be a poor move order that leads to a search space explosion
+Since even without the Qsearch we are searching 2M nodes
+Good Val 0 Searched 14,832,520 QSearched 12,640,954 Time 43.771s
+*/
+
 public class MyBot : IChessBot
 {
     readonly int[] pieceValues = { 0, 100, 300, 300, 500, 900, 0 };
@@ -25,6 +34,7 @@ public class MyBot : IChessBot
         return sum * (currentBoard.IsWhiteToMove ? 1 : -1);
     }
     int nodes = 0;
+    int qNodes = 0;
 
     void Order(Move[] moves)
     {
@@ -66,6 +76,7 @@ public class MyBot : IChessBot
         foreach (Move move in moves)
         {
             nodes++;
+            qNodes++;
             currentBoard.MakeMove(move);
             val = -Quiesce(-beta, -alpha);
             currentBoard.UndoMove(move);
@@ -118,8 +129,9 @@ public class MyBot : IChessBot
         currentBoard = board;
         Move retMove = Move.NullMove;
         nodes = 0;
+        qNodes = 0;
         var val = AlphaBetaSearch(-1073741824, 1073741824, 5, (move) => { retMove = move; });
-        Console.WriteLine($"Good Val {val} Searched {nodes}");
+        Console.WriteLine($"Good Val {val} Searched {nodes} QSearched {qNodes} Time {timer.MillisecondsElapsedThisTurn}ms");
         return retMove;
     }
 }

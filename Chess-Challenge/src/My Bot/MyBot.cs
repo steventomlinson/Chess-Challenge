@@ -3,27 +3,28 @@ using System.Linq;
 using System;
 using System.Collections.Generic;
 
-/**
-TODO: investigate performance with and without table
-TODO: check to see performance with and without move ordering
-
-TODO: Game 5: this is crazy search space at depth 5 atm, I think this may be a poor move order that leads to a search space explosion
-Since even without the Qsearch we are searching 2M nodes
-Good Val 0 Searched 14,832,520 QSearched 12,640,954 Time 43.771s
-*/
-
 public class MyBot : IChessBot
 {
-    readonly int[] pieceValues = { 0, 100, 300, 300, 500, 900, 0 };
-    Board currentBoard;
     struct Entry
     {
-        public bool occupied = false;
         public int value = 0;
+        public Move move = Move.NullMove;
         public int depth = 0;
+        public int type = 0;
         public Entry() { }
-    };
-    Entry[] table;
+    }
+    Entry[] table = new Entry[1024 * 1024 * 100];
+
+    readonly int[] pieceValues = { 0, 100, 300, 300, 500, 900, 20000 };
+    Board currentBoard;
+
+    int rootDepth;
+    int currentDepth;
+    Timer currentTimer;
+
+    ulong TableHash => currentBoard.ZobristKey % (ulong)table.LongLength;
+
+    Entry TableEntry => table[TableHash];
 
     int Evaluate()
     {
@@ -35,6 +36,7 @@ public class MyBot : IChessBot
     }
     int nodes = 0;
     int qNodes = 0;
+    int lookups = 0;
 
     void Order(Move[] moves)
     {
@@ -42,6 +44,10 @@ public class MyBot : IChessBot
         foreach (Move move in moves)
         {
             int score = 0;
+            if (TableEntry.move == move)
+            {
+                score = 32001;
+            }
             if (move.IsCapture)
                 score += 10 * pieceValues[(int)move.CapturePieceType] - pieceValues[(int)move.MovePieceType];
             if (move.IsPromotion)
@@ -56,20 +62,48 @@ public class MyBot : IChessBot
         Array.Sort(moves, (m1, m2) => { return move_value[m2] - move_value[m1]; });
     }
 
+    int GetStoredValue(int alpha, int beta)
+    {
+        if (TableEntry.move != Move.NullMove && currentDepth <= TableEntry.depth)
+        {
+            if (TableEntry.type == 1)
+            {
+                lookups++;
+                return TableEntry.value;
+            }
+            if (TableEntry.type == 0 && TableEntry.value <= alpha)
+            {
+                lookups++;
+                return TableEntry.value;
+            }
+            if (TableEntry.type == 2 && TableEntry.value >= beta)
+            {
+                lookups++;
+                return TableEntry.value;
+            }
+        }
+        return 999999;
+    }
+
+    int StoreValue(Move move, int type, int value)
+    {
+        table[TableHash].move = move;
+        table[TableHash].depth = currentDepth;
+        table[TableHash].type = type;
+        return table[TableHash].value = value;
+    }
+
     int Quiesce(int alpha, int beta)
     {
-        var entry = table[currentBoard.ZobristKey % (ulong)table.Length];
-        if (entry.occupied)
-        {
-            return Math.Max(entry.value, alpha);
-        }
+        int bestValue = GetStoredValue(alpha, beta);
+        if (bestValue != 999999)
+            return bestValue;
 
-        int val = Evaluate();
-        if (val >= beta)
-            return beta;
+        bestValue = Evaluate();
+        if (bestValue >= beta) return bestValue;
+        if (alpha < bestValue)
+            alpha = bestValue;
 
-        if (alpha < val)
-            alpha = val;
 
         var moves = currentBoard.GetLegalMoves(true);
         Order(moves);
@@ -78,60 +112,97 @@ public class MyBot : IChessBot
             nodes++;
             qNodes++;
             currentBoard.MakeMove(move);
-            val = -Quiesce(-beta, -alpha);
+            int val = -Quiesce(-beta, -alpha);
             currentBoard.UndoMove(move);
-            if (val > alpha)
-                alpha = val;
-            if (alpha >= beta) break;
+            bestValue = Math.Max(val, bestValue);
+            if (bestValue >= beta) break;
+            if (bestValue > alpha)
+                alpha = bestValue;
         }
-        return alpha;
+        return bestValue;
     }
 
-    int AlphaBetaSearch(int alpha, int beta, int depth, Action<Move> action)
+    int AlphaBetaSearch(int alpha, int beta)
     {
-        var entry = table[currentBoard.ZobristKey % (ulong)table.Length];
-        if (entry.occupied && depth < entry.depth)
-        {
-            return Math.Max(entry.value, alpha);
-        }
-        if (depth == 0) return Quiesce(alpha, beta);
         if (currentBoard.IsDraw()) return 0;
+        int bestValue = GetStoredValue(alpha, beta);
+        if (bestValue != 999999)
+            return bestValue;
+
+        if (currentDepth == 0) return Quiesce(alpha, beta);
         // This allows us to always be making progress to checkmate when checkmate is available
         // before we would move back and forth between positions until forced to due to a.
-        if (currentBoard.IsInCheckmate()) return -999999 - depth;
+        if (currentBoard.IsInCheckmate()) return -32001 + (rootDepth - currentDepth);
 
         var moves = currentBoard.GetLegalMoves();
         Order(moves);
+        bestValue = -32001;
+        Move bestMove = Move.NullMove;
+        int type = 0;
 
         foreach (Move move in moves)
         {
             nodes++;
             currentBoard.MakeMove(move);
-            int val = -AlphaBetaSearch(-beta, -alpha, depth - 1, (move) => { });
+            currentDepth--;
+            int val = -AlphaBetaSearch(-beta, -alpha);
+            currentDepth++;
             currentBoard.UndoMove(move);
-
-            if (val > alpha)
+            if (currentTimer.MillisecondsElapsedThisTurn > 200)
+                return bestValue;
+            if (val > bestValue)
             {
-                alpha = val;
-                action(move);
+                bestValue = val;
+                bestMove = move;
+                if (val > alpha)
+                {
+                    if (val >= beta)
+                        return StoreValue(move, 2, bestValue);
+                    alpha = val;
+                    type = 1;
+                }
             }
-            if (alpha >= beta) break;
         }
-        entry.occupied = true;
-        entry.value = alpha;
-        entry.depth = depth;
-        return alpha;
+        return StoreValue(bestMove, type, bestValue);
+    }
+
+    int IterDeepen()
+    {
+        int bestValue = -32001;
+        int val = bestValue;
+        rootDepth = 0;
+        while (true)
+        {
+            currentDepth = rootDepth;
+            var window = 10;
+            while (true)
+            {
+                var alpha = Math.Max(val - window, -32001);
+                var beta = Math.Min(val + window, 32001);
+                val = AlphaBetaSearch(alpha, beta);
+                if (currentTimer.MillisecondsElapsedThisTurn > 200)
+                    goto exit;
+                bestValue = val;
+                if (val <= alpha || val >= beta)
+                    window *= 2;
+                else
+                    break;
+            }
+            rootDepth++;
+        }
+    exit:
+        return bestValue;
     }
 
     public Move Think(Board board, Timer timer)
     {
-        table = new Entry[1024 * 1024 * 100];
         currentBoard = board;
-        Move retMove = Move.NullMove;
+        currentTimer = timer;
         nodes = 0;
         qNodes = 0;
-        var val = AlphaBetaSearch(-1073741824, 1073741824, 5, (move) => { retMove = move; });
-        Console.WriteLine($"Good Val {val} Searched {nodes} QSearched {qNodes} Time {timer.MillisecondsElapsedThisTurn}ms");
-        return retMove;
+        lookups = 0;
+        var val = IterDeepen();
+        Console.WriteLine($"Good Val {val} Depth {rootDepth} Lookups {lookups} Searched {nodes} QSearched {qNodes} Time {timer.MillisecondsElapsedThisTurn}ms");
+        return TableEntry.move;
     }
 }
